@@ -134,9 +134,44 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+    
+    num_threads = num_threads;
+    // Create threads and start worker loops
+    workers.reserve(num_threads);
+    for (int i = 0; i < num_threads; i++) {
+        workers.emplace_back([this](){this->workerLoop();});
+    }
 }
 
-TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {}
+TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
+    stop.store(true);
+    for (auto& t : workers) {
+        t.join();   // wait for all workers to exit
+    }
+}
+
+void TaskSystemParallelThreadPoolSpinning::workerLoop() {
+    while (true) {
+        if (stop.load()) {
+            return;
+        }
+        // Wait for work
+        if (!hasWork.load()) {   // spin until there is work
+            std::this_thread::yield();
+            continue;
+        }
+
+        // Get next task
+        int task_id = next.fetch_add(1);
+        if (task_id >= curr_num_total_tasks) {  // all tasks have been assigned
+            std::this_thread::yield();
+            continue;
+        }
+
+        curr_runnable->runTask(task_id, curr_num_total_tasks);
+        finished.fetch_add(1);
+    }
+}
 
 void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_total_tasks) {
 
@@ -147,9 +182,25 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
     // tasks sequentially on the calling thread.
     //
 
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    curr_runnable=runnable;
+    curr_num_total_tasks=num_total_tasks;
+    next.store(0);
+    finished.store(0);
+    hasWork.store(true);    // turn on hasWork only after setting curr_runnable and curr_num_total_tasks
+
+    while(true) {   // main thread also do works
+        int task_id = next.fetch_add(1);
+        if (task_id >= curr_num_total_tasks) {
+            break;  // at this point, all tasks have been assigned, but not necessarily finished
+        }
+        curr_runnable->runTask(task_id, curr_num_total_tasks);
+        finished.fetch_add(1);
     }
+    
+    while (finished.load() < curr_num_total_tasks) {
+        std::this_thread::yield();  // wait for all assigned tasks to finish before returning
+    }
+    hasWork.store(false);
 }
 
 TaskID TaskSystemParallelThreadPoolSpinning::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
