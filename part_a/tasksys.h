@@ -4,6 +4,8 @@
 #include "itasksys.h"
 #include <atomic>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -93,6 +95,9 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         std::atomic<int> finished{0};
         std::atomic<bool> hasWork{false};
         std::atomic<bool> stop{false};
+
+        std::mutex m_has_work;
+        std::condition_variable cv_has_work;
 
         IRunnable* curr_runnable;
         int curr_num_total_tasks;

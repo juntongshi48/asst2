@@ -138,7 +138,7 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
     num_threads = num_threads;
     // Create threads and start worker loops
     workers.reserve(num_threads);
-    for (int i = 0; i < num_threads; i++) {
+    for (int i = 0; i < num_threads-1; i++) {  // main thread also do works, so create num_threads-1 workers
         workers.emplace_back([this](){this->workerLoop();});
     }
 }
@@ -234,7 +234,7 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
     num_threads = num_threads;
     // Create threads and start worker loops
     workers.reserve(num_threads);
-    for (int i = 0; i < num_threads; i++) {
+    for (int i = 0; i < num_threads-1; i++) {   // main thread also do works, so create num_threads-1 workers
         workers.emplace_back([this](){this->workerLoop();});
     }
 }
@@ -247,6 +247,7 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
     // (requiring changes to tasksys.h).
     //
     stop.store(true);
+    cv_has_work.notify_all(); // wake up all sleeping workers so they can exit
     for (auto& t : workers) {
         t.join();   // wait for all workers to exit
     }
@@ -254,15 +255,16 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
 
 void TaskSystemParallelThreadPoolSleeping::workerLoop() {
     while (true) {
+        // Wait for work
+        std::unique_lock<std::mutex> lk(m_has_work);
+        cv_has_work.wait(lk, [this]{return (hasWork.load() && next.load() < curr_num_total_tasks) || stop.load();}); // first check if there is batch of tasks to dd
+        // next check if there is still tasks in the batch to do (this will sleep additional trheads in the case where the number of tasks is less than the number of threads)
+        // also check stop b/c stop may be set after hasWork is set to false, so if we don't check stop here, the worker may wait forever
         if (stop.load()) {
             return;
         }
-        // Wait for work
-        if (!hasWork.load()) {   // spin until there is work
-            std::this_thread::yield();
-            continue;
-        }
-
+        lk.unlock();
+        
         // Get next task
         int task_id = next.fetch_add(1);
         if (task_id >= curr_num_total_tasks) {  // all tasks have been assigned
@@ -289,6 +291,7 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     next.store(0);
     finished.store(0);
     hasWork.store(true);    // turn on hasWork only after setting curr_runnable and curr_num_total_tasks
+    cv_has_work.notify_all(); // wake up all sleeping workers
 
     while(true) {   // main thread also do works
         int task_id = next.fetch_add(1);
