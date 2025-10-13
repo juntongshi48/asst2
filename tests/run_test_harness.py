@@ -125,8 +125,12 @@ if __name__ == '__main__':
                             x[0] for x in LIST_OF_TESTS]))
     parser.add_argument('-a', '--run_async', action='store_true',
                         help='Run async tests')
+    parser.add_argument('-i', '--iterations', type=int, default=NUM_TEST_RUNS,
+        help='Number of times to run each test (default: %d)' % NUM_TEST_RUNS
+    )
 
     args = parser.parse_args()
+    NUM_TEST_RUNS = args.iterations
 
     test_names_and_num_threads = []
 

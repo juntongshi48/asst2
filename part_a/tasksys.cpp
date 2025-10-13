@@ -1,4 +1,5 @@
 #include "tasksys.h"
+#include <thread>
 
 
 IRunnable::~IRunnable() {}
@@ -55,6 +56,7 @@ TaskSystemParallelSpawn::TaskSystemParallelSpawn(int num_threads): ITaskSystem(n
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+    numThreads = num_threads;
 }
 
 TaskSystemParallelSpawn::~TaskSystemParallelSpawn() {}
@@ -68,9 +70,40 @@ void TaskSystemParallelSpawn::run(IRunnable* runnable, int num_total_tasks) {
     // tasks sequentially on the calling thread.
     //
 
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    // STATIC VERSION
+    int min_tasks_per_thread;
+    int N = 4; 
+    int num_active_threads;
+    if (num_total_tasks < N) {  // heuristic to still exploit some parallelism for very small number of tasks
+        min_tasks_per_thread = 1;
     }
+    else{
+        min_tasks_per_thread = 4; // heuristic to avoid creating too many threads for small number of tasks
+    }
+    num_active_threads = std::min(
+        std::min(numThreads, num_total_tasks), 
+        (num_total_tasks+min_tasks_per_thread-1)/min_tasks_per_thread
+    ); // avoid creating more threads than tasks
+
+    int num_task_per_thread = (num_total_tasks+num_active_threads-1) / num_active_threads;
+    std::vector<std::thread> threads;
+    for (int i = 0; i < num_active_threads; i++) {
+        int start = i * num_task_per_thread;
+        int end = std::min(start + num_task_per_thread, num_total_tasks);
+        threads.push_back(std::thread([runnable, num_total_tasks, start, end]() {
+            for (int j = start; j < end; j++) {
+                runnable->runTask(j, num_total_tasks);
+            }
+        }));
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    // for (int i = 0; i < num_total_tasks; i++) {
+    //     runnable->runTask(i, num_total_tasks);
+    // }
 }
 
 TaskID TaskSystemParallelSpawn::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
