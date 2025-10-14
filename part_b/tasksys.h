@@ -2,6 +2,27 @@
 #define _TASKSYS_H
 
 #include "itasksys.h"
+#include <atomic>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <unordered_map>
+#include <deque>
+#include <vector>
+#include <memory>
+#include <algorithm>
+
+struct Launch {
+    TaskID tid;
+    IRunnable* runnable;
+    int num_total_tasks;
+    std::atomic<int> next{0};
+    std::atomic<int> finished{0};
+    std::atomic<bool> all_done{false};
+
+    std::atomic<int> num_deps_left{0};
+    std::vector<TaskID> dependents;
+};
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -68,6 +89,24 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                 const std::vector<TaskID>& deps);
         void sync();
+    private:
+        int numThreads;
+        std::vector<std::thread> workers;
+        std::unordered_map<TaskID, std::shared_ptr<Launch>> launches;
+        std::deque<std::shared_ptr<Launch>> ready_q;
+        int next_task_id = 0;
+        int submitted_cnt = 0;
+        int completed_cnt = 0;
+
+        std::atomic<bool> stop{false};
+
+        // Synchronizations
+        std::mutex m;
+        std::condition_variable cv_has_work;
+        std::condition_variable cv_submitted_are_completed;
+
+        void workerLoop();
+        void on_launch_complete(std::shared_ptr<Launch> L);
 };
 
 #endif
