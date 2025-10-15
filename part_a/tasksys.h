@@ -40,6 +40,12 @@ class TaskSystemParallelSpawn: public ITaskSystem {
         void sync();
     private:
         int numThreads;
+        
+        std::atomic<int> next{0};
+        IRunnable* runnable;
+        int num_total_tasks;
+
+        void workerLoop();
 };
 
 /*

@@ -62,55 +62,80 @@ typedef struct {
 */
 class YourTask : public IRunnable {
     public:
-        YourTask() {}
+        int *output_;
+        YourTask(int *output) : output_(output) {}
         ~YourTask() {}
-        void runTask(int task_id, int num_total_tasks) {}
+
+        void runTask(int task_id, int num_total_tasks) {
+            output_[task_id] = task_id;
+        }
 };
 /*
  * Implement your test here. Call this function from a wrapper that passes in
  * do_async and num_elements. See `simpleTest`, `simpleTestSync`, and
  * `simpleTestAsync` as an example.
  */
-TestResults yourTest(ITaskSystem* t, bool do_async, int num_elements, int num_bulk_task_launches) {
+TestResults lightestTestBase(ITaskSystem* t, bool do_async) {
     // TODO: initialize your input and output buffers
-    int* output = new int[num_elements];
+    int num_elements=1;
+    int num_bulk_task_launches=10;
+
+    int *light_task_output = new int[num_elements];
+
+    for (int i = 0; i < num_elements; i++) {
+        light_task_output[i] = 0;
+    }
+
+    YourTask light_task(light_task_output);
 
     // TODO: instantiate your bulk task launches
 
     // Run the test
     double start_time = CycleTimer::currentSeconds();
     if (do_async) {
-        // TODO:
-        // initialize dependency vector
-        // make calls to t->runAsyncWithDeps and push TaskID to dependency vector
-        // t->sync() at end
+        std::vector<TaskID> deps;
+        TaskID light_task_id = t->runAsyncWithDeps(
+            &light_task, num_elements, deps);
+        deps.push_back(light_task_id);
+        for (int i = 1; i < num_bulk_task_launches; i++) {
+            t->runAsyncWithDeps(&light_task, num_elements, deps);
+        }
+        t->sync();
     } else {
-        // TODO: make calls to t->run
+        for (int i = 1; i < num_bulk_task_launches; i++) {
+            t->run(&light_task, num_elements);
+        }
     }
     double end_time = CycleTimer::currentSeconds();
+
 
     // Correctness validation
     TestResults results;
     results.passed = true;
 
     for (int i=0; i<num_elements; i++) {
-        int value = 0; // TODO: initialize value
-        for (int j=0; j<num_bulk_task_launches; j++) {
-            // TODO: update value as expected
-        }
+        int value = i; // TODO: initialize value
 
         int expected = value;
-        if (output[i] != expected) {
+        if (light_task_output[i] != expected) {
             results.passed = false;
-            printf("%d: %d expected=%d\n", i, output[i], expected);
+            printf("%d: %d expected=%d\n", i, light_task_output[i], expected);
             break;
         }
     }
     results.time = end_time - start_time;
 
-    delete [] output;
+    delete [] light_task_output;
 
     return results;
+}
+
+TestResults lightest(ITaskSystem* t) {
+    return lightestTestBase(t, false);
+}
+
+TestResults lightestAsyncTest(ITaskSystem* t) {
+    return lightestTestBase(t, true);
 }
 
 /*

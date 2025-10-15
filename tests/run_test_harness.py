@@ -38,6 +38,7 @@ LIST_OF_TESTS = [
     ("math_operations_in_tight_for_loop_reduction_tree", UNSPECIFIED_NUM_THREADS),
     ("spin_between_run_calls", UNSPECIFIED_NUM_THREADS),
     ("mandelbrot_chunked", UNSPECIFIED_NUM_THREADS),
+    ("lightest", UNSPECIFIED_NUM_THREADS),
 ]
 
 LIST_OF_IMPLEMENTATIONS_ORIG = [
@@ -132,7 +133,7 @@ if __name__ == '__main__':
     )
 
     args = parser.parse_args()
-    NUM_TEST_RUNS = args.iterations
+    # NUM_TEST_RUNS = args.iterations
 
     test_names_and_num_threads = []
 

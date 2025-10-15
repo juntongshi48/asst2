@@ -61,6 +61,18 @@ TaskSystemParallelSpawn::TaskSystemParallelSpawn(int num_threads): ITaskSystem(n
 
 TaskSystemParallelSpawn::~TaskSystemParallelSpawn() {}
 
+void TaskSystemParallelSpawn::workerLoop() {
+    while (true) {
+        // Get next task
+        int task_id = next.fetch_add(1);
+        if (task_id >= num_total_tasks) {  // all tasks have been assigned
+            break;
+        }
+
+        runnable->runTask(task_id, num_total_tasks);
+    }
+}
+
 void TaskSystemParallelSpawn::run(IRunnable* runnable, int num_total_tasks) {
 
 
@@ -85,25 +97,46 @@ void TaskSystemParallelSpawn::run(IRunnable* runnable, int num_total_tasks) {
         (num_total_tasks+min_tasks_per_thread-1)/min_tasks_per_thread
     ); // avoid creating more threads than tasks
 
-    int num_task_per_thread = (num_total_tasks+num_active_threads-1) / num_active_threads;
-    std::vector<std::thread> threads;
-    for (int i = 0; i < num_active_threads; i++) {
-        int start = i * num_task_per_thread;
-        int end = std::min(start + num_task_per_thread, num_total_tasks);
-        threads.push_back(std::thread([runnable, num_total_tasks, start, end]() {
-            for (int j = start; j < end; j++) {
-                runnable->runTask(j, num_total_tasks);
-            }
-        }));
+    // // Static Version with contiguous chunks
+    // int num_task_per_thread = (num_total_tasks+num_active_threads-1) / num_active_threads;
+    // std::vector<std::thread> threads;
+    // for (int i = 0; i < num_active_threads; i++) {
+    //     int start = i * num_task_per_thread;
+    //     int end = std::min(start + num_task_per_thread, num_total_tasks);
+    //     threads.push_back(std::thread([runnable, num_total_tasks, start, end]() {
+    //         for (int j = start; j < end; j++) {
+    //             runnable->runTask(j, num_total_tasks);
+    //         }
+    //     }));
+    // }
+
+    // // Static Version with round-robin
+    // std::vector<std::thread> threads;
+    // for (int i = 0; i < num_active_threads; i++) {
+    //     // int start = i * num_task_per_thread;
+    //     // int end = std::min(start + num_task_per_thread, num_total_tasks);
+    //     threads.push_back(std::thread([runnable, num_total_tasks, num_active_threads, i]() {
+    //         for (int j = i; j < num_total_tasks; j+=num_active_threads) {
+    //             runnable->runTask(j, num_total_tasks);
+    //         }
+    //     }));
+    // }
+
+    // Dynamic Version
+    std::vector<std::thread> workers;
+    next.store(0);
+    workers.reserve(num_active_threads);
+    this->runnable = runnable;
+    this-> num_total_tasks = num_total_tasks;
+    for (int i = 0; i < num_active_threads-1; i++) {   // main thread also do works, so create num_threads-1 workers
+        workers.emplace_back([this](){this->workerLoop();});
     }
 
-    for (auto& t : threads) {
+    workerLoop(); // main thread also do works
+
+    for (auto& t : workers) {
         t.join();
     }
-
-    // for (int i = 0; i < num_total_tasks; i++) {
-    //     runnable->runTask(i, num_total_tasks);
-    // }
 }
 
 TaskID TaskSystemParallelSpawn::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,

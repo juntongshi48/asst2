@@ -1,6 +1,7 @@
 #include "tasksys.h"
 #include <thread>
 
+#define MAXCHUNK 4 // default chunk size for task stealing
 
 IRunnable::~IRunnable() {}
 
@@ -134,7 +135,7 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
-    num_threads = num_threads;
+    numThreads = num_threads;
     workers.reserve(num_threads);
     for (int i=0; i<num_threads; i++) { // main thread does not do work in this case, so we create num_threads workers
         workers.emplace_back([this](){this->workerLoop();});
@@ -156,6 +157,15 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
     }
 }
 
+// bool TaskSystemParallelThreadPoolSleeping::hasUnclaimedReady(){
+//     for (auto& L : ready_q) {
+//         if (L->next.load() < L->num_total_tasks) {
+//             return true;
+//         }
+//     }
+//     return false;
+// };
+
 void TaskSystemParallelThreadPoolSleeping::workerLoop() {
     while (true) {
         std::shared_ptr<Launch> L;
@@ -163,32 +173,48 @@ void TaskSystemParallelThreadPoolSleeping::workerLoop() {
         {
             std::unique_lock<std::mutex> lk(m);
             cv_has_work.wait(lk, [this]{return !ready_q.empty() || stop.load();}); // first check if there is a launch of tasks to do
+            // hasUunclaimedReady() provides a more rigourous check than just checking if ready_q is non-empty, as it also check if all tasks has been claimed
             // also check stop b/c stop may be set after hasWork is set to false, so if we don't check stop here, the worker may wait forever
             if (stop.load()) {
                 return;
             }
             L = ready_q.front();
-            ready_q.pop_front();
-            ready_q.push_back(L); // round-robin scheduling of launches s.t. all launches in ready_q get a chance to be worked on
+            int len = ready_q.size();
+            if (len > 1) {  // round-robin scheduling of launches s.t. all launches in ready_q get a chance to be worked on
+                // this improved mathoperation+treereduction test
+                ready_q.pop_front();
+                ready_q.push_back(L);
+            }
         }
         
-        // Get next task
-        int task_id = L->next.fetch_add(1);
-        if (task_id >= L->num_total_tasks) {  // all tasks have been assigned
-            continue;
-        }
+        // // Single task at a time
+        // int task_id = L->next.fetch_add(1);
+        // if (task_id >= L->num_total_tasks) {  // all tasks have been assigned
+        //     continue;
+        // }
 
-        L->runnable->runTask(task_id, L->num_total_tasks);
-        if (L->finished.fetch_add(1) == L->num_total_tasks-1) {
-            on_launch_complete(L);
-        }
+        // L->runnable->runTask(task_id, L->num_total_tasks);
+        // if (L->finished.fetch_add(1) == L->num_total_tasks-1) {
+        //     on_launch_complete(L);
+        // }
+        
+        // Chunk of tasks at a time
+        int start = L->next.fetch_add(L->chunk_size);
+        if (start >= L->num_total_tasks) continue;
+
+        int end = std::min(start + L->chunk_size, L->num_total_tasks);
+        for (int task_id = start; task_id < end; ++task_id)
+            L->runnable->runTask(task_id, L->num_total_tasks);
+
+        int num_finished = end - start;
+        if (L->finished.fetch_add(num_finished) == L->num_total_tasks-num_finished) on_launch_complete(L);
     }
 }
 
 // Routines to do when all tasks of a launch is completed.
 // Most works need to be done under lock.
 void TaskSystemParallelThreadPoolSleeping::on_launch_complete(std::shared_ptr<Launch> L) {
-    std::vector<TaskID> children = L->dependents;
+    std::vector<TaskID> children;
     {   // acquire lock whenever modify ready_q and launches
         std::lock_guard<std::mutex> lk(m);
         
@@ -201,13 +227,16 @@ void TaskSystemParallelThreadPoolSleeping::on_launch_complete(std::shared_ptr<La
         }
         // Update the global completed count
         completed_cnt++;
+
+        // Take the snap of children in side the lock
+        children = L->dependents;
         
         // Notify dependents
         for (TaskID cid : children) {
             auto it = launches.find(cid);
             if (it != launches.end()) { // is a children
                 std::shared_ptr<Launch> child = it->second;
-                if (child->num_deps_left.fetch_sub(1) == 1) {
+                if (child->num_deps_left.fetch_sub(1) == 1) {   // if child has no more deps
                     // initialize child
                     child->next.store(0);
                     child->finished.store(0);
@@ -243,6 +272,11 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
     // TODO: CS149 students will implement this method in Part B.
     //
 
+    // Initialize chunk_size
+    // It should not be to large, otherwise the load balancing will be poor
+    // It should not be too small, otherwise the overhead of small tasks will be large
+    int chunk_size=std::min(MAXCHUNK, std::max((num_total_tasks + numThreads - 1)/numThreads-2, 1));
+
     std::shared_ptr<Launch> L = std::make_shared<Launch>();
     {   // acquire lock whenever modify ready_q and launches
         std::lock_guard<std::mutex> lk(m);
@@ -252,12 +286,13 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
         L->next.store(0);
         L->finished.store(0);
         L->all_done.store(false);
+        L->chunk_size = chunk_size;
 
         // Init dependencies
         int num_deps = 0;
         for (TaskID tid : deps) {
             auto it = launches.find(tid);
-            if (it != launches.end()) { // is a dependency
+            if (it != launches.end()) { // this parent is still active
                 std::shared_ptr<Launch> dep_L = it->second;
                 if (!dep_L->all_done.load()) {
                     num_deps++;

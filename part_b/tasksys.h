@@ -22,6 +22,8 @@ struct Launch {
 
     std::atomic<int> num_deps_left{0};
     std::vector<TaskID> dependents;
+
+    int chunk_size{1};
 };
 
 /*
@@ -105,6 +107,7 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         std::condition_variable cv_has_work;
         std::condition_variable cv_submitted_are_completed;
 
+        // bool hasUnclaimedReady();
         void workerLoop();
         void on_launch_complete(std::shared_ptr<Launch> L);
 };
