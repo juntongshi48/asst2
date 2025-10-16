@@ -199,15 +199,21 @@ void TaskSystemParallelThreadPoolSleeping::workerLoop() {
         // }
         
         // Chunk of tasks at a time
-        int start = L->next.fetch_add(L->chunk_size);
-        if (start >= L->num_total_tasks) continue;
+        while(true){
+            int start = L->next.fetch_add(L->chunk_size);
+            if (start >= L->num_total_tasks) break;
 
-        int end = std::min(start + L->chunk_size, L->num_total_tasks);
-        for (int task_id = start; task_id < end; ++task_id)
-            L->runnable->runTask(task_id, L->num_total_tasks);
+            int end = std::min(start + L->chunk_size, L->num_total_tasks);
+            for (int task_id = start; task_id < end; ++task_id)
+                L->runnable->runTask(task_id, L->num_total_tasks);
 
-        int num_finished = end - start;
-        if (L->finished.fetch_add(num_finished) == L->num_total_tasks-num_finished) on_launch_complete(L);
+            int num_finished = end - start;
+            if (L->finished.fetch_add(num_finished) == L->num_total_tasks-num_finished)
+            {
+                on_launch_complete(L);
+                break;
+            }
+        }
     }
 }
 
@@ -215,6 +221,7 @@ void TaskSystemParallelThreadPoolSleeping::workerLoop() {
 // Most works need to be done under lock.
 void TaskSystemParallelThreadPoolSleeping::on_launch_complete(std::shared_ptr<Launch> L) {
     std::vector<TaskID> children;
+    int num_new_works=0;
     {   // acquire lock whenever modify ready_q and launches
         std::lock_guard<std::mutex> lk(m);
         
@@ -227,9 +234,11 @@ void TaskSystemParallelThreadPoolSleeping::on_launch_complete(std::shared_ptr<La
         }
         // Update the global completed count
         completed_cnt++;
-
+        
         // Take the snap of children in side the lock
         children = L->dependents;
+        // Remove from launches
+        launches.erase(L->tid);
         
         // Notify dependents
         for (TaskID cid : children) {
@@ -242,11 +251,14 @@ void TaskSystemParallelThreadPoolSleeping::on_launch_complete(std::shared_ptr<La
                     child->finished.store(0);
                     child->all_done.store(false);
                     ready_q.push_back(child);
+                    num_new_works++;
                 }
             }
         }
     }
-    cv_has_work.notify_all(); // new work might be available
+    if (num_new_works > 0){
+        cv_has_work.notify_all(); // new work might be available
+    }
     cv_submitted_are_completed.notify_all(); // completed_cnt has incremented, so sync() might become unblocked
 }
 
@@ -273,9 +285,27 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
     //
 
     // Initialize chunk_size
-    // It should not be to large, otherwise the load balancing will be poor
-    // It should not be too small, otherwise the overhead of small tasks will be large
+    // It should not be to large, otherwise the load balancing will be poor(e.g.ping_pong_unequal)
+    // It should not be too small, otherwise the overhead of very tiny tasks(e.g. super_super_light) will be large
     int chunk_size=std::min(MAXCHUNK, std::max((num_total_tasks + numThreads - 1)/numThreads-2, 1));
+
+    // Initialized the number of active threads
+    int min_tasks_per_thread;
+    int num_active_threads;
+    int N = 10; 
+    if (num_total_tasks <= N) {
+        min_tasks_per_thread = 1;
+    } // heuristic to still exploit some parallelism for very small number of tasks
+    else{
+        min_tasks_per_thread = 2;
+    }
+    // else {
+    //     min_tasks_per_thread = 8;
+    // } // heuristic to avoid creating too many threads for small number of tasks
+    num_active_threads = std::min(
+        std::min(numThreads, num_total_tasks), 
+        (num_total_tasks+min_tasks_per_thread-1)/min_tasks_per_thread
+    ); // avoid creating more threads than tasks
 
     std::shared_ptr<Launch> L = std::make_shared<Launch>();
     {   // acquire lock whenever modify ready_q and launches
@@ -306,7 +336,14 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
 
         if (num_deps == 0) {
             ready_q.push_back(L);
-            cv_has_work.notify_all(); // new work is available
+            if (num_active_threads < numThreads) {
+                for (int i=0; i<num_active_threads; i++) {
+                    cv_has_work.notify_one(); //cheaper
+                }
+            }
+            else{
+                cv_has_work.notify_all(); //realatively expensitve
+            }
         }
     }
     return L->tid;
